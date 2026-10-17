@@ -1,0 +1,6 @@
+# file          folders (src/buildtools/oslayout.py)
+INSTUDF.EXE    DOS
+UNINUDF.EXE    DOS
+WINGRP.EXE     WIN3X WIN9X
+WINUDF.EXE     DOS
+WINUDF.VXD     WIN9X
