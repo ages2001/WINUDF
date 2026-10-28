@@ -82,16 +82,31 @@ static void implid(u8 FAR *p)
 
 /* ------------------------------------------------------------------ space bitmaps */
 
-/* block of byte off of the space bitmap descriptor of map pmi */
+#define BM_EMBED 0xFFFFU            /* part of bm_get: the bitmap is embedded in its file entry */
+
+/* block of byte off of the space bitmap descriptor of map pmi. A metadata bitmap file
+   whose data is embedded in its file entry (Windows 10 and later format small metadata
+   partitions so): the pointer is to the data in the entry, off is below the block size */
 static u8 FAR *bm_get(struct udf_vol *v, u8 pmi, u32 off, u32 *abs, u32 *lbn, u16 *part)
 {
     struct udf_pmap *pm = &v->pm[pmi];
     if (pm->type == PM_META) {
         struct udf_node *b = &v->sys[2];
         u32 run;
-        if (b->ftype != FT_MBITMAP || udf_bmap(v, b, off, abs, &run) || !*abs) return 0;
+        if (b->ftype != FT_MBITMAP) return 0;
+        if (b->adtype == AD_ICB) {
+            u8 FAR *p;
+            if (off >= b->size || off >= b->lad) return 0;
+            p = udf_bget(v, b->feabs);
+            if (!p) return 0;
+            *abs = b->feabs;
+            *lbn = b->loc.lbn;
+            *part = BM_EMBED;
+            return p + FEHDR(b) + b->lea;
+        }
+        if (udf_bmap(v, b, off, abs, &run) || !*abs) return 0;
         *part = b->c_part;
-        *lbn = b->c_lbn + ((off - b->c_off) >> v->bsh);
+        *lbn = b->c_lbn + (u32)((off - b->c_off) >> v->bsh);
         return udf_bget(v, *abs);
     }
     if (!pm->ubm_len) return 0;
@@ -110,6 +125,19 @@ static u32 bm_bits(struct udf_vol *v, u8 pmi)
         if (p && udf_tagok(p, 264, 0xFFFFFFFFUL, 0)) pm->ubm_bits = G32(p, 16);
     }
     return pm->ubm_bits;
+}
+
+/* writes back a block bm_get gave out (an embedded bitmap: its file entry, tag again) */
+static int bm_put(struct udf_vol *v, u16 part, u32 lbn, u32 abs, u8 FAR *p)
+{
+    if (part == BM_EMBED) {
+        struct udf_node *b = &v->sys[2];
+        u8 FAR *fe = udf_bget(v, abs);
+        if (!fe) return UE_IO;
+        udf_tagset(fe, G16(fe, 0), G16(fe, 2), b->loc.lbn, (u16)(FEHDR(b) + b->lea + b->lad));
+        return pput(v, b->loc.part, b->loc.lbn, abs, fe);
+    }
+    return pput(v, part, lbn, abs, p);
 }
 
 /* free (val 1) or take (val 0) n blocks from lbn in map pmi */
@@ -137,7 +165,7 @@ static int bm_set(struct udf_vol *v, u8 pmi, u32 lbn, u32 n, int val)
             n--;
             if (!(lbn & 7)) o++;
         }
-        r = pput(v, part, blbn, abs, p);
+        r = bm_put(v, part, blbn, abs, p);
         if (r) return r;
     }
     return 0;
@@ -650,7 +678,7 @@ static int bmap_lbn(struct udf_vol *v, struct udf_node *n, u32 off, u32 *abs, u3
     r = udf_bmap(v, n, off, abs, &run);
     if (r) return r;
     if (!*abs) return UE_CORRUPT;
-    *lbn = n->c_lbn + ((off - n->c_off) >> v->bsh);
+    *lbn = n->c_lbn + (u32)((off - n->c_off) >> v->bsh);
     return 0;
 }
 
@@ -733,7 +761,7 @@ static s32 data_write(struct udf_vol *v, struct udf_node *n, u32 off, u32 len, c
             }
         } else {
             u8 FAR *p;
-            u32 lbn = n->c_lbn + ((off + done - n->c_off) >> v->bsh);
+            u32 lbn = n->c_lbn + (u32)((off + done - n->c_off) >> v->bsh);
             u16 part = n->c_part;
             if (k > BS(v) - in) k = BS(v) - in;
             p = (in == 0 && k == BS(v)) ? udf_bnew(v, abs) : udf_bget(v, abs);

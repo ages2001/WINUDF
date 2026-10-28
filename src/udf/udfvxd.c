@@ -178,12 +178,14 @@ struct aep {
 #define IORF_VERSION_002        0x0400
 #define IORF_LOGICAL_START_SECTOR 0x80000UL
 #define IORS_ERROR      0x10
+#define IORS_UNFORMATTED 0x1C
 #define IORS_NO_MEDIA   0x18
 #define IORS_UNCERTAIN  0x19
 #define IORS_WRITE_PROTECT 0x1F
 #define IORS_NOT_READY  0x20
 #define DCB_TYPE_CDROM  5
 #define DCB_DEV_WRITEABLE 0x02
+#define DCB_DEV_REMOVABLE 0x04
 #define IOR_PENDING(r)  (*(volatile u32 *)((u8 *)(r) + 0x58))   /* after the IOR, in the IOP */
 
 typedef long long s64;
@@ -331,6 +333,9 @@ struct wvol {
     u8 cdrom;
     u8 dead;                    /* dismounted, waiting for its handles */
     u8 probe;                   /* being mounted or verified */
+    u8 bunit;                   /* BIOS drive (80h ..) the sectors are read through, 0 none */
+    u16 laststat;               /* status of the last request */
+    u32 pstart;                 /* BIOS path: first sector of the partition */
     u16 refs;                   /* open files and find handles */
     struct wobj *objs;
 };
@@ -411,6 +416,7 @@ static int ios_io(struct wvol *w, u16 func, u64 lba, u32 count, u8 *buf)
     vx_cli();
     while (IOR_PENDING(r)) vx_block((u32)r, 1);
     vx_sti();
+    w->laststat = r->status;
     if (r->status >= IORS_ERROR) {
         DLOG(("WINUDF: I/O %w lba %x n %x status %w\r\n", func, (u32)lba, count, r->status));
         return r->status;
@@ -418,11 +424,93 @@ static int ios_io(struct wvol *w, u16 func, u64 lba, u32 count, u8 *buf)
     return 0;
 }
 
+/* ---- the BIOS path: a partition the disk driver of Windows took for an unformatted FAT
+   volume (Windows 10 and later format UDF disks inside a partition of type 06h or 07h; the
+   I/O Supervisor then fails every request to the drive): the sectors through INT 13h
+   extensions in V86 mode, the BIOS drive and the partition start from the DOS drive table */
+struct v86r { u32 eax, ebx, ecx, edx, esi, edi; u16 ds, es; u32 flags; };
+int __cdecl vx_intr(u32 n, struct v86r *r);
+extern u32 vx_v86buf;
+#define V86SEC  16                  /* sectors per BIOS call */
+
+static int bios_rw(struct wvol *w, u64 lba, u32 n, u8 *buf, int wr)
+{
+    u8 *dap = (u8 *)vx_v86buf, *data = dap + 16;
+    while (n) {
+        u32 k = n > V86SEC ? V86SEC : n;
+        struct v86r r;
+        int tries;
+        u64 a = lba + w->pstart;
+        for (tries = 0; tries < 3; tries++) {
+            mzero(dap, 16);
+            dap[0] = 16;
+            dap[2] = (u8)k;
+            *(u16 *)(dap + 4) = (u16)(((u32)data) & 15);
+            *(u16 *)(dap + 6) = (u16)(((u32)data) >> 4);
+            *(u32 *)(dap + 8) = (u32)a;
+            *(u32 *)(dap + 12) = (u32)(a >> 32);
+            if (wr) mcopy(data, buf, k * 512);
+            mzero(&r, sizeof(r));
+            r.eax = wr ? 0x4300 : 0x4200;
+            r.edx = w->bunit;
+            r.ds = (u16)(((u32)dap) >> 4);
+            r.esi = ((u32)dap) & 15;
+            vx_intr(0x13, &r);
+            if (!(r.flags & 1) && !(r.eax & 0xFF00)) break;
+        }
+        if (tries == 3) return -1;
+        if (!wr) mcopy(buf, data, k * 512);
+        buf += k * 512;
+        lba += k;
+        n -= k;
+    }
+    return 0;
+}
+
+/* the BIOS drive and partition of DOS drive w->drive (IO.SYS block devices, INT 2Fh 0803h)
+   when they hold a UDF volume: 0 */
+static int bios_find(struct wvol *w)
+{
+    struct v86r r;
+    u32 seg, off, guard;
+    if (w->dev.ssize != 512) return -1;
+    mzero(&r, sizeof(r));
+    r.eax = 0x0803;
+    vx_intr(0x2F, &r);
+    seg = r.ds;
+    off = r.edi & 0xFFFF;
+    for (guard = 0; guard < 32 && off != 0xFFFF && (seg || off); guard++) {
+        u8 *bds = (u8 *)(seg * 16 + off);
+        if (bds[5] == w->drive && bds[4] >= 0x80) {
+            u32 s;
+            mzero(&r, sizeof(r));
+            r.eax = 0x4100;
+            r.ebx = 0x55AA;
+            r.edx = bds[4];
+            vx_intr(0x13, &r);
+            if ((r.flags & 1) || (r.ebx & 0xFFFF) != 0xAA55 || !(r.ecx & 1)) return -1;
+            w->bunit = bds[4];
+            w->pstart = *(u32 *)(bds + 6 + 17);         /* BPB hidden sectors */
+            for (s = 64; s < 64 + 16 * 4; s += 4) {     /* the volume recognition sequence */
+                if (bios_rw(w, s, 1, bounce, 0)) break;
+                if (bounce[1] == 'N' && bounce[2] == 'S' && bounce[3] == 'R' && bounce[4] == '0') return 0;
+                if (bounce[1] == 'T' && bounce[2] == 'E' && bounce[3] == 'A') break;
+            }
+            w->bunit = 0;
+            return -1;
+        }
+        off = *(u16 *)bds;
+        seg = *(u16 *)(bds + 2);
+    }
+    return -1;
+}
+
 static int dev_rw(struct udf_dev *d, u64 lba, u16 n, u8 *buf, int wr)
 {
     struct wvol *w = (struct wvol *)d->ctx;
     u32 max = BOUNCE / d->ssize;
     if (w->dead) return -1;
+    if (w->bunit) return bios_rw(w, lba, n, buf, wr);
     while (n) {
         u32 k = n > max ? max : n, bytes = k * d->ssize;
         if (wr) mcopy(bounce, buf, bytes);
@@ -775,7 +863,15 @@ static int mount(struct wvol *w)
 {
     int r;
     w->probe = 1;
+    w->laststat = 0;
     r = udf_mount(&w->v, &w->dev, 0, 0);
+    if (r && !w->cdrom && w->laststat == IORS_UNFORMATTED && vx_v86buf && bios_find(w) == 0) {
+        udf_cache_drop(&w->v);
+        r = udf_mount(&w->v, &w->dev, 0, 0);
+        DLOG(("WINUDF: drive %b through the BIOS: unit %b partition at %x -> %x\r\n", w->drive, w->bunit,
+              w->pstart, (u32)r));
+        if (r) w->bunit = 0;
+    }
     if (r && r != UE_IO && w->cdrom && nsr(w)) {
         u32 n = cd_last(w);
         if (n) {
@@ -872,6 +968,12 @@ static int __cdecl fs_mount(struct ioreq *ir)
         r = 0;
         if (vol_of(ir)) {
             struct wvol *w = vol_of(ir);
+            /* safe removal: the volume is closed (integrity descriptor) while the disk is
+               still there; open files keep their space, the volume stays consistent */
+            if (!w->dead) {
+                w->v.nopen = 0;
+                udf_sync(&w->v);
+            }
             w->dead = 1;
             if (!w->refs) vol_free(w);
         }
@@ -1055,6 +1157,7 @@ static int __cdecl fs_delete(struct ioreq *ir)
     u16 llen;
     int r;
     enter();
+    DLOG(("WINUDF: delete fl %b opt %w len %x pos %x\r\n", ir->flags, ir->options, ir->length, ir->pos));
     if (!udf_writable(&w->v)) {
         r = E_WRPROT;
         goto out;
@@ -1153,6 +1256,7 @@ static int __cdecl fs_dir(struct ioreq *ir)
     u16 llen;
     int r;
     enter();
+    DLOG(("WINUDF: dir fl %b opt %w len %x pos %x\r\n", ir->flags, ir->options, ir->length, ir->pos));
     switch (ir->flags) {
     case 0:                                         /* CREATE_DIR */
         if (!udf_writable(&w->v)) {
@@ -1214,6 +1318,7 @@ static int __cdecl fs_attrib(struct ioreq *ir)
     struct udf_node *n;
     struct udf_time t;
     enter();
+    DLOG(("WINUDF: attrib fl %b opt %w len %x pos %x\r\n", ir->flags, ir->options, ir->length, ir->pos));
     r = walk(w, ir->ppath, 0, 0);
     if (r) {
         r = r == UE_NOTFOUND ? E_NOTFOUND : r == WALK_NOPATH ? E_NOPATH : err(r);
@@ -1279,6 +1384,7 @@ static int __cdecl fs_flush(struct ioreq *ir)
 {
     struct wvol *w = vol_of(ir);
     enter();
+    DLOG(("WINUDF: flush fl %b opt %w len %x pos %x\r\n", ir->flags, ir->options, ir->length, ir->pos));
     if (w && !w->dead) udf_sync(&w->v);
     leave();
     return ret(ir, 0);
@@ -1289,6 +1395,7 @@ static int __cdecl fs_diskinfo(struct ioreq *ir)
     struct wvol *w = vol_of(ir);
     u32 total, fr, spc = 1;
     enter();
+    DLOG(("WINUDF: diskinfo fl %b opt %w len %x pos %x\r\n", ir->flags, ir->options, ir->length, ir->pos));
     total = udf_totalblocks(&w->v);
     fr = udf_writable(&w->v) ? udf_freeblocks(&w->v) : 0;
     if (ir->options & 1) {
@@ -1362,6 +1469,7 @@ static int __cdecl fs_rename(struct ioreq *ir)
     int r, n = 0;
     u32 dpos = 0xFFFFFFFFUL;
     enter();
+    DLOG(("WINUDF: rename fl %b opt %w len %x pos %x\r\n", ir->flags, ir->options, ir->length, ir->pos));
     if (!udf_writable(&w->v)) {
         r = E_WRPROT;
         goto out;
@@ -1616,6 +1724,7 @@ static int __cdecl fs_search(struct ioreq *ir)
     u16 slot;
     struct srch *s;
     enter();
+    DLOG(("WINUDF: search fl %b opt %w len %x pos %x\r\n", ir->flags, ir->options, ir->length, ir->pos));
     if (ir->flags == 0) {                           /* SEARCH_FIRST */
         const u16 *last;
         u16 llen, i, best = 0;
@@ -1683,6 +1792,7 @@ static int __cdecl fs_query(struct ioreq *ir)
     struct wvol *w = vol_of(ir);
     int r = 0;
     enter();
+    DLOG(("WINUDF: query fl %b opt %w len %x pos %x\r\n", ir->flags, ir->options, ir->length, ir->pos));
     if (ir->options == 2) {
         if (ir->data && ir->length >= 4) {
             ir->data[0] = 'U';
@@ -1702,6 +1812,7 @@ static int __cdecl fs_disconnect(struct ioreq *ir)
 {
     struct wvol *w = vol_of(ir);
     enter();
+    DLOG(("WINUDF: disconnect fl %b opt %w len %x pos %x\r\n", ir->flags, ir->options, ir->length, ir->pos));
     DLOG(("WINUDF: disconnect %b refs %w\r\n", w ? w->drive : 0xFF, w ? w->refs : 0));
     if (w) {
         srch_drop(w);
@@ -1715,11 +1826,13 @@ static int __cdecl fs_disconnect(struct ioreq *ir)
 
 static int __cdecl fs_unsupported(struct ioreq *ir)
 {
+    DLOG(("WINUDF: unsupported fl %b opt %w len %x pos %x\r\n", ir->flags, ir->options, ir->length, ir->pos));
     return ret(ir, E_INVFUNC);
 }
 
 static int __cdecl fs_denied(struct ioreq *ir)
 {
+    DLOG(("WINUDF: denied fl %b opt %w len %x pos %x\r\n", ir->flags, ir->options, ir->length, ir->pos));
     return ret(ir, E_ACCESS);
 }
 
@@ -1740,6 +1853,7 @@ static int __cdecl fs_ioctl(struct ioreq *ir)
     u16 ax = *(u16 *)(c + 0x1C), cx = *(u16 *)(c + 0x18), bx = *(u16 *)(c + 0x10);
     int r = 0;
     enter();
+    DLOG(("WINUDF: ioctl fl %b opt %w len %x pos %x\r\n", ir->flags, ir->options, ir->length, ir->pos));
     if (ax == 0x440D && (cx == 0x0866 || cx == 0x4866)) {
         struct mid *m = (struct mid *)vx_map_flat(c, 0x3C14);
         u16 i;
@@ -1752,6 +1866,23 @@ static int __cdecl fs_ioctl(struct ioreq *ir)
         mcopy(m->fstype, "UDF     ", 8);
     } else if (ax == 0x440D && (cx == 0x0846 || cx == 0x4846)) {
         r = E_ACCESS;                               /* set media ID */
+    } else if (ax == 0x4408) {
+        /* removable media? Answered here: KERNEL's profile code (WritePrivateProfileString,
+           Explorer's desktop.ini) asks it while it writes a file, and the I/O Supervisor would
+           take it to the real-mode DOS of the system VM, which waits for this very drive */
+        u32 fl = w->dcb ? *(u32 *)(w->dcb + 0x20) : 0;
+        *(u16 *)(c + 0x1C) = (u16)((w->cdrom || (fl & DCB_DEV_REMOVABLE)) ? 0 : 1);
+    } else if (ax == 0x4409) {
+        *(u16 *)(c + 0x14) = 0;                     /* a local drive */
+    } else if (ax == 0x440D && (cx == 0x086F || cx == 0x486F)) {
+        u8 *m = (u8 *)vx_map_flat(c, 0x3C14);       /* drive map information */
+        u32 map = 1UL << (w->drive & 31);
+        m[1] = 16;
+        m[2] = 0x01;                                /* protected mode only */
+        m[3] = w->bunit ? w->bunit : 0xFF;
+        mcopy(m + 4, &map, 4);
+        mcopy(m + 8, &w->pstart, 4);
+        mzero(m + 12, 4);
     } else {
         struct ior *q = w->ior;
         mzero(q, sizeof(*q));
@@ -1877,6 +2008,7 @@ static int __cdecl fs_findopen(struct ioreq *ir)
     int r;
     struct wfind *f;
     enter();
+    DLOG(("WINUDF: findopen fl %b opt %w len %x pos %x\r\n", ir->flags, ir->options, ir->length, ir->pos));
     r = walk(w, ir->ppath, &last, &llen);
     if (r && r != UE_NOTFOUND) {
         r = r == WALK_NOPATH ? E_NOPATH : err(r);
@@ -1923,6 +2055,7 @@ static int __cdecl fs_findnext(struct ioreq *ir)
     struct wfind *f = (struct wfind *)ir->fh;
     int r;
     enter();
+    DLOG(("WINUDF: findnext fl %b opt %w len %x pos %x\r\n", ir->flags, ir->options, ir->length, ir->pos));
     r = f->w->dead ? E_NOMORE : find_next(ir, f);
     leave();
     return ret(ir, r);
@@ -1937,6 +2070,7 @@ static int __cdecl fs_findclose(struct ioreq *ir)
 {
     struct wfind *f = (struct wfind *)ir->fh;
     enter();
+    DLOG(("WINUDF: findclose fl %b opt %w len %x pos %x\r\n", ir->flags, ir->options, ir->length, ir->pos));
     if (f) {
         struct wvol *w = f->w;
         vx_heap_free(f, 0);
@@ -1955,6 +2089,7 @@ static int __cdecl fs_read(struct ioreq *ir)
     s32 n;
     int r = 0;
     enter();
+    DLOG(("WINUDF: read fl %b opt %w len %x pos %x\r\n", ir->flags, ir->options, ir->length, ir->pos));
     if ((h->mode & ACCESS_MODE) == 1) r = E_ACCESS;
     else if (o->w->dead) r = E_NOTREADY;
     else if (ir->length) {
@@ -1981,6 +2116,7 @@ static int __cdecl fs_write(struct ioreq *ir)
     struct wvol *w = o->w;
     int r = 0;
     enter();
+    DLOG(("WINUDF: write fl %b opt %w len %x pos %x\r\n", ir->flags, ir->options, ir->length, ir->pos));
     if ((h->mode & ACCESS_MODE) == 0 || (h->mode & ACCESS_MODE) == 3) r = E_ACCESS;
     else if (w->dead) r = E_NOTREADY;
     else if (ir->length == 0) {
@@ -2005,6 +2141,7 @@ static int __cdecl fs_seek(struct ioreq *ir)
     struct whandle *h = (struct whandle *)ir->fh;
     int r = 0;
     enter();
+    DLOG(("WINUDF: seek fl %b opt %w len %x pos %x\r\n", ir->flags, ir->options, ir->length, ir->pos));
     if (ir->flags == 2) {                           /* FILE_END */
         s32 p = (s32)h->o->n.size + (s32)ir->pos;
         if (p < 0) r = 131;
@@ -2020,6 +2157,7 @@ static int __cdecl fs_close(struct ioreq *ir)
     struct wobj *o = h->o, **op;
     struct wvol *w = o->w;
     enter();
+    DLOG(("WINUDF: close fl %b opt %w len %x pos %x\r\n", ir->flags, ir->options, ir->length, ir->pos));
     if (ir->flags == 2) {                           /* CLOSE_FINAL */
         u8 acc = (u8)(h->mode & ACCESS_MODE);
         for (pp = &o->handles; *pp; pp = &(*pp)->next)
@@ -2049,11 +2187,13 @@ static int __cdecl fs_close(struct ioreq *ir)
 
 static int __cdecl fs_commit(struct ioreq *ir)
 {
+    DLOG(("WINUDF: commit fl %b opt %w len %x pos %x\r\n", ir->flags, ir->options, ir->length, ir->pos));
     return ret(ir, 0);
 }
 
 static int __cdecl fs_locks(struct ioreq *ir)
 {
+    DLOG(("WINUDF: locks fl %b opt %w len %x pos %x\r\n", ir->flags, ir->options, ir->length, ir->pos));
     return ret(ir, ir->flags <= 1 ? 0 : E_INVFUNC);
 }
 
@@ -2064,6 +2204,7 @@ static int __cdecl fs_filetimes(struct ioreq *ir)
     struct udf_time t;
     int r = 0;
     enter();
+    DLOG(("WINUDF: filetimes fl %b opt %w len %x pos %x\r\n", ir->flags, ir->options, ir->length, ir->pos));
     switch (ir->flags) {
     case 0:
         ir->aux2 = t2dos(&o->n.mtime);
@@ -2098,6 +2239,7 @@ static int __cdecl fs_enumhandle(struct ioreq *ir)
     struct wobj *o = h->o;
     int r = 0;
     enter();
+    DLOG(("WINUDF: enumhandle fl %b opt %w len %x pos %x\r\n", ir->flags, ir->options, ir->length, ir->pos));
     if (ir->flags == 0) {                           /* ENUMH_GETFILEINFO */
         u8 *b = ir->data;
         u64 ft;

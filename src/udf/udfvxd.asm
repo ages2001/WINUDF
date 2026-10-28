@@ -11,6 +11,12 @@
 ; VMM services
 %define SVC_Get_VMM_Version     00010000h
 %define SVC_Get_Cur_VM_Handle   00010001h
+%define SVC_Begin_Nest_V86_Exec 00010082h
+%define SVC_Exec_Int            00010084h
+%define SVC_End_Nest_Exec       00010086h
+%define SVC_Save_Client_State   0001008Dh
+%define SVC_Restore_Client_State 0001008Eh
+%define SVC_Alloc_Global_V86    000100A8h
 %define SVC_Map_Flat            0001001Ch
 %define SVC_Create_Semaphore    00010025h
 %define SVC_Wait_Semaphore      00010027h
@@ -45,7 +51,7 @@ WINUDF_DDB:
         dd 0                    ; next
         dw 0400h                ; SDK version (Windows 95)
         dw 0                    ; Undefined_Device_ID: no services
-        db 1, 0                 ; version 1.0
+        db 1, 1                 ; version 1.1
         dw 0                    ; flags
         db 'WINUDF  '           ; name
         dd 0A0010100h           ; FSD_Init_Order: after the IFS Manager
@@ -65,6 +71,9 @@ segment _DATA public class=DATA use32 align=4
 segment _BSS public class=BSS use32 align=16
 global _bss_begin
 _bss_begin:
+segment _DATA
+global _vx_v86buf
+_vx_v86buf dd 0
 segment ZZBSS public class=BSS use32 align=16
 global _bss_end
 _bss_end:
@@ -83,6 +92,12 @@ Control:
         xor eax, eax
         cld
         rep stosb
+        ; a buffer in V86 memory for the BIOS disk calls (only possible now)
+        push dword 0204h                ; GVDAParaAlign | GVDAZeroInit
+        push dword 2200h                ; 16 sectors of 512 bytes and the packet
+        VMMCALL SVC_Alloc_Global_V86
+        add esp, 8
+        mov [_vx_v86buf], eax
         pop ecx
         pop edi
         clc
@@ -132,6 +147,70 @@ CSVC _vx_metamatch, SVC_IFS_MetaMatch, 3         ; int (u16 *pattern, u16 *name,
 CSVC _vx_unitobcs, SVC_IFS_UniToBCS, 5           ; u32 (u8 *out, u16 *in, bytes, max, set)
 CSVC _vx_bcstouni, SVC_IFS_BCSToUni, 4           ; u32 (u16 *out, u8 *in, bytes, set)
 CSVC _vx_ios_register, SVC_IOS_Register, 1       ; void (struct drp *)
+
+; int vx_intr(u32 n, struct v86r *r): software interrupt n in V86 mode (nested execution in
+; the current VM); r: EAX EBX ECX EDX ESI EDI, DS ES (words), flags out
+global _vx_intr
+_vx_intr:
+        push ebp
+        push ebx
+        push esi
+        push edi
+        sub esp, 80h
+        VMMCALL SVC_Get_Cur_VM_Handle
+        mov ebp, [ebx + 8]              ; CB_Client_Pointer
+        mov edi, esp
+        VMMCALL SVC_Save_Client_State
+        VMMCALL SVC_Begin_Nest_V86_Exec
+        mov esi, [esp + 98h]            ; r
+        mov eax, [esi]
+        mov [ebp + 1Ch], eax
+        mov eax, [esi + 4]
+        mov [ebp + 10h], eax
+        mov eax, [esi + 8]
+        mov [ebp + 18h], eax
+        mov eax, [esi + 12]
+        mov [ebp + 14h], eax
+        mov eax, [esi + 16]
+        mov [ebp + 4], eax
+        mov eax, [esi + 20]
+        mov [ebp + 0], eax
+        movzx eax, word [esi + 24]
+        mov [ebp + 3Ch], eax
+        movzx eax, word [esi + 26]
+        mov [ebp + 38h], eax
+        and dword [ebp + 2Ch], ~1
+        mov eax, [esp + 94h]            ; n
+        VMMCALL SVC_Exec_Int
+        mov esi, [esp + 98h]
+        mov eax, [ebp + 1Ch]
+        mov [esi], eax
+        mov eax, [ebp + 10h]
+        mov [esi + 4], eax
+        mov eax, [ebp + 18h]
+        mov [esi + 8], eax
+        mov eax, [ebp + 14h]
+        mov [esi + 12], eax
+        mov eax, [ebp + 4]
+        mov [esi + 16], eax
+        mov eax, [ebp + 0]
+        mov [esi + 20], eax
+        mov ax, [ebp + 3Ch]
+        mov [esi + 24], ax
+        mov ax, [ebp + 38h]
+        mov [esi + 26], ax
+        mov eax, [ebp + 2Ch]
+        mov [esi + 28], eax
+        VMMCALL SVC_End_Nest_Exec
+        mov esi, esp
+        VMMCALL SVC_Restore_Client_State
+        add esp, 80h
+        cld
+        pop edi
+        pop esi
+        pop ebx
+        pop ebp
+        ret
 
 ; u32 vx_vmm_version(void): major << 8 | minor
 global _vx_vmm_version

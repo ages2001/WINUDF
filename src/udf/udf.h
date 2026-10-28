@@ -181,7 +181,7 @@ struct udf_node {
     struct udf_time mtime, atime, ctime;
     struct udf_loc stream;      /* named streams directory (extended file entry), lbn ~0 none */
     /* allocation descriptor cursor of the last mapping (sequential access) */
-    u32 c_off;                  /* file offset where the cursor extent begins */
+    u64 c_off;                  /* file offset where the cursor extent begins */
     u32 c_blk;                  /* absolute block the descriptor at c_pos is in */
     u16 c_pos, c_end;           /* byte offset of the descriptor in that block, end of the list */
     u32 c_elen;                 /* extent at the cursor: length in bytes, */
@@ -259,8 +259,8 @@ int udf_mount(struct udf_vol *v, struct udf_dev *d, u64 base, u32 nblocks);
 int udf_probe_bs(struct udf_dev *d, u64 base, u32 nsect);
 int udf_map(struct udf_vol *v, u16 part, u32 lbn, u32 *abs);
 int udf_iget(struct udf_vol *v, struct udf_loc loc, struct udf_node *n);
-s32 udf_read(struct udf_vol *v, struct udf_node *n, u32 off, u32 len, u8 FAR *buf);
-int udf_bmap(struct udf_vol *v, struct udf_node *n, u32 off, u32 *abs, u32 *run);
+s32 udf_read(struct udf_vol *v, struct udf_node *n, u64 off, u32 len, u8 FAR *buf);
+int udf_bmap(struct udf_vol *v, struct udf_node *n, u64 off, u32 *abs, u32 *run);
 int udf_readdir(struct udf_vol *v, struct udf_node *dir, u32 *pos, struct udf_fid *f);
 int udf_dirempty(struct udf_vol *v, struct udf_node *dir);   /* uses udf_fidw[1] */
 extern struct udf_fid udf_fidw[2];          /* entries of the write operations */

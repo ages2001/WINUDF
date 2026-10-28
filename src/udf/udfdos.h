@@ -40,6 +40,10 @@ struct dvol {
 };
 
 extern struct rregs __cdecl rr;
+extern struct rregs __cdecl lr;     /* registers of an INT 21h AH=71h call */
+extern u16 __cdecl psp;             /* PSP of the program */
+extern u8 __cdecl lfn_on;           /* the long file name functions are served */
+extern u16 __cdecl ressize;         /* paragraphs that stay resident */
 extern struct dosinfo di;
 extern struct dvol vols[MAXVOL];
 extern u8 nvols;
@@ -50,10 +54,10 @@ int __cdecl intx(int n, struct rregs *r);
 void __cdecl farcall(void __far *fn, struct rregs *r);
 void __cdecl hook2f(void);
 void __cdecl unhook2f(void);
-extern void __far * __cdecl old2f;
-extern u8 __cdecl resend[];
-extern u8 __cdecl imgend[];
+void __cdecl unhook_links(void __far * __far *l2f, void __far * __far *l21);
 extern u8 __cdecl exitcode;
+void __cdecl int2f(void);
+void __cdecl int21(void);
 
 void dvol_setdev(struct dvol *dv);
 int cd_mount(struct dvol *dv);
@@ -61,6 +65,7 @@ struct winreq;
 int win_call(u8 mplex, struct winreq *q);
 int __cdecl redir(void);
 int __cdecl api(void);
+int __cdecl lfn(void);
 int __cdecl dos_init(void);
 
 #endif

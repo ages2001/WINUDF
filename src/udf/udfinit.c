@@ -529,8 +529,8 @@ static void usage(void)
 
 static int args(void)
 {
-    char FAR *p = (char FAR *)MK_FP(FP_SEG((void FAR *)&di), 0x81);
-    u8 len = *(u8 FAR *)MK_FP(FP_SEG((void FAR *)&di), 0x80);
+    char FAR *p = (char FAR *)MK_FP(psp, 0x81);
+    u8 len = *(u8 FAR *)MK_FP(psp, 0x80);
     char FAR *end = p + len;
     while (p < end) {
         char c;
@@ -587,26 +587,39 @@ static int unload(void)
     r.ax = 0xD601;
     intx(0x2F, &r);
     if (r.ax != 0) {
-        puts_("WINUDF cannot be unloaded: a program loaded after it uses INT 2Fh\n");
+        puts_("WINUDF cannot be unloaded: a program loaded after it hooked INT 2Fh or INT 21h\n"
+              "and cannot be passed by (no IBM Interrupt Sharing Protocol header)\n");
         return 1;
     }
     seg = r.es;
-    /* the cache block and the program (its PSP is 10h paragraphs below the code) */
+    /* the cache block and the program (ES: its PSP). The
+       upper memory blocks are linked into the chain for the walk, so blocks there (the
+       cache usually is) are found too, whether or not this program was loaded high. */
     {
         u8 FAR *mcb = (u8 FAR *)MK_FP(0, 0);
-        u16 owner = (u16)(seg - 0x10), m;
+        u16 owner = seg, m, link, guard = 0;
         struct rregs q;
+        q.ax = 0x5802;
+        intx(0x21, &q);
+        link = (u8)q.ax;
+        q.ax = 0x5803;
+        q.bx = 1;
+        intx(0x21, &q);
         q.ax = 0x5200;
         intx(0x21, &q);
         m = *(u16 FAR *)MK_FP(q.es, q.bx - 2);
-        while (1) {
+        while (guard++ < 8192) {
             u16 next;
             mcb = (u8 FAR *)MK_FP(m, 0);
+            if (mcb[0] != 'M' && mcb[0] != 'Z') break;
             next = (u16)(m + 1 + *(u16 FAR *)(mcb + 3));
             if (*(u16 FAR *)(mcb + 1) == owner && (u16)(m + 1) != owner) dosfree((u16)(m + 1));
             if (mcb[0] == 'Z') break;
             m = next;
         }
+        q.ax = 0x5803;
+        q.bx = link;
+        intx(0x21, &q);
         dosfree(owner);
     }
     puts_("WINUDF unloaded\n");
@@ -617,7 +630,7 @@ int __cdecl dos_init(void)
 {
     struct rregs r;
     u16 bsmax = 2048, i;
-    puts_("WINUDF 1.0 - UDF file system for DOS and Windows 1.0-3.11 (UDF 1.02-2.60)\n");
+    puts_("WINUDF 1.1 - UDF file system for DOS and Windows 1.0-3.11 (UDF 1.02-2.60)\n");
     if (args()) {
         usage();
         exitcode = 1;
@@ -648,11 +661,6 @@ int __cdecl dos_init(void)
     }
     codepage();
     udf_osclass = 1;
-    /* the program block: only the image (DOS gave all memory to the .COM) */
-    r.ax = 0x4A00;
-    r.es = FP_SEG((void FAR *)&di);
-    r.bx = (u16)(((u16)(void *)imgend + 15) >> 4);
-    intx(0x21, &r);
     /* a cache for the scan: the largest block size decides the size of the cache blocks */
     if (cache_setup(4096)) {
         puts_("WINUDF: not enough memory\n");
@@ -695,18 +703,32 @@ int __cdecl dos_init(void)
     hook2f();
     /* the environment is not needed */
     {
-        u16 env = *(u16 FAR *)MK_FP(FP_SEG((void FAR *)&di), 0x2C);
+        u16 env = *(u16 FAR *)MK_FP(psp, 0x2C);
         if (env) {
             dosfree(env);
-            *(u16 FAR *)MK_FP(FP_SEG((void FAR *)&di), 0x2C) = 0;
+            *(u16 FAR *)MK_FP(psp, 0x2C) = 0;
         }
     }
     if (!opt_quiet) {
         puts_("WINUDF resident, ");
-        putdec(((u32)(u16)(u32)(void *)resend + 15) >> 4 << 4);
+        putdec((u32)ressize << 4);
         puts_(" bytes + ");
         putdec((u32)(nslots + 1) * bsmax);
         puts_(" bytes of cache\n");
     }
-    return (int)(((u16)(void *)resend + 15) >> 4);
+    /* the handles of the program (standard input, output, ... maybe redirected to a file)
+       are closed before it stays resident: they would keep their system file table
+       entries in use for good */
+    {
+        u16 n = *(u16 FAR *)MK_FP(psp, 0x32), h;
+        u8 FAR *jft = *(u8 FAR * FAR *)MK_FP(psp, 0x34);
+        if (ver < 0x0300 || n > 255) n = 20;
+        for (h = 0; h < n; h++) {
+            if (jft[h] == 0xFF) continue;
+            r.ax = 0x3E00;
+            r.bx = h;
+            intx(0x21, &r);
+        }
+    }
+    return 1;
 }

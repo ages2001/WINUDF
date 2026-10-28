@@ -1,4 +1,6 @@
-# WINUDF 1.0 — UDF file system for DOS, Windows 1.0x–3.11 and Windows 95 / 98 / ME
+# WINUDF 1.1 — UDF file system for DOS, Windows 1.0x–3.11 and Windows 95 / 98 / ME
+
+The complete manual. **README.md** has the short overview and the installation.
 
 WINUDF brings **UDF** (Universal Disk Format, ECMA-167 / OSTA UDF), the file system of DVDs,
 Blu-ray discs, packet-written CD-R/RW and UDF-formatted USB sticks and disks, to older
@@ -29,7 +31,7 @@ together with the others:
 |---------|----------------|
 | **WINDISK**  | IDE, SATA AHCI and NVMe disks, IDE/AHCI CD/DVD drives, SD card readers and eMMC |
 | **WINUSB**   | USB host controllers and devices, PS/2 mouse and keyboard, touchpads, USB4 / Thunderbolt |
-| **WINAUDIO** | HD Audio, AC'97 and the Intel audio DSP (SST / SOF), General MIDI synthesizer |
+| **WINAUDIO** | HD Audio, AC'97 and the Intel audio DSP (SST / SOF), General MIDI synthesizer, Sound Blaster 16 emulation for DOS programs |
 | **WINUDF**   | the UDF file system (DVD, Blu-ray, packet-written CDs, UDF disks), read and write |
 
 ---
@@ -38,7 +40,7 @@ together with the others:
 
 | System | WINUDF |
 |--------|------|
-| MS-DOS 3.10 – 6.x | UDF volumes (`WINUDF.EXE`) |
+| MS-DOS 3.10 – 8.0, FreeDOS | UDF volumes (`WINUDF.EXE`) |
 | Windows 1.0x, 2.x (real mode) | UDF volumes (`WINUDF.EXE`) |
 | Windows/386 2.x | not tried |
 | Windows 3.0, 3.1, WfW 3.11 | UDF volumes as network drives (`WINUDF.EXE`) |
@@ -61,7 +63,7 @@ Files used by several systems are in each of their folders. The installer is run
 
 | Folder | Files |
 |--------|-------|
-| `bin/DOS` | `INSTUDF.EXE`, `README.TXT`, `UNINUDF.EXE`, `WINUDF.EXE` |
+| `bin/DOS` | `INSTUDF.EXE`, `MANUAL.TXT`, `README.TXT`, `UNINUDF.EXE`, `WINUDF.EXE` |
 | `bin/WIN3X` | `WINGRP.EXE`, `WINUDF.TXT` |
 | `bin/WIN9X` | `WINGRP.EXE`, `WINUDF.TXT`, `WINUDF.VXD` |
 
@@ -72,18 +74,20 @@ Files used by several systems are in each of their folders. The installer is run
 | `WINUDF.EXE`  | DOS | DOS network redirector (INT 2Fh 11h), memory resident (DOS, Windows 1.0x–3.11) |
 | `INSTUDF.EXE` | DOS | installer (from DOS or from a DOS box of Windows 95/98/ME) |
 | `UNINUDF.EXE` | DOS | uninstaller |
-| `README.TXT`  | DOS | this text (code page 437) |
+| `README.TXT`  | DOS | the short README (code page 437) |
+| `MANUAL.TXT`  | DOS | this manual (code page 437) |
 | `WINGRP.EXE`  | WIN3X, WIN9X | creates the Program Manager / Start menu group at the next start of Windows |
-| `WINUDF.TXT`  | WIN3X, WIN9X | this text for Notepad ("Read Me" item of the group) |
+| `WINUDF.TXT`  | WIN3X, WIN9X | this manual for Notepad ("Read Me" item of the group) |
 | `WINUDF.VXD`  | WIN9X | Windows 95 / 98 / ME file system driver (IFS Manager FSD), static VxD |
 
 ## 2. DOS and Windows 1.0x–3.11: WINUDF.EXE
 
-`WINUDF.EXE` is loaded in AUTOEXEC.BAT **after MSCDEX**. At start it scans
+`WINUDF.EXE` is loaded in AUTOEXEC.BAT **after MSCDEX or SHSUCDX** (any CD-ROM redirector
+with the MSCDEX interface; `LH` / `LOADHIGH` loads it into upper memory). At start it scans
 
-* the CD / DVD / BD drives of MSCDEX (WINDISK's `WINCD.SYS`, WINUSB's `WINUCD.SYS` or any
-  CD-ROM device driver): a drive with a UDF disc appears as UDF under MSCDEX's letter, ISO
-  9660 discs stay with MSCDEX. A disc change is noticed.
+* the CD / DVD / BD drives of the CD-ROM redirector (MSCDEX, SHSUCDX; WINDISK's `WINCD.SYS`,
+  WINUSB's `WINUCD.SYS` or any CD-ROM device driver): a drive with a UDF disc appears as UDF
+  under the redirector's letter, ISO 9660 discs stay with it. A disc change is noticed.
 * BIOS disks (INT 13h extensions) and the disks of WINDISK / WINUSB (USB sticks, NVMe, SD):
   when the whole disk is UDF (superfloppy) or MBR / GPT partitions hold UDF, they get letters
   from the first free one (from x with `/L:x`).
@@ -103,6 +107,29 @@ Options:
 CONFIG.SYS needs `LASTDRIVE=Z` (the installer adds it when there is no LASTDRIVE line). DOS
 3.10 and later; in Windows 3.x Standard and 386 Enhanced Mode the drives appear inside Windows
 too (as network drives), and in Windows 1.0x / 2.x as well.
+
+* **Long file names in DOS:** DOS does not pass the long file name functions (INT 21h
+  AX=71xxh) to a redirector, so WINUDF serves them itself for its drives, as Windows 95/98/ME
+  do in their MS-DOS boxes: find first / next / close (714Eh, 714Fh, 71A1h, long and 8.3
+  names, FILETIME or DOS times), open / create (716Ch, new files get their long names), make /
+  remove / change directory (7139h, 713Ah, 713Bh), delete with wildcards (7141h), attributes
+  and times (7143h), current directory (7147h), true name (7160h: full, 8.3 or long path),
+  rename / move (7156h), volume information (71A0h: "UDF", case preserved), file information
+  by handle (71A6h, 64-bit size), FILETIME / DOS time conversion (71A7h) and the free space
+  of MS-DOS 7.1 (7303h). MS-DOS 7.1's COMMAND.COM (DIR, CD, MD, COPY, TYPE with quoted long
+  names) and programs that use the LFN API (DOSLFN-aware programs, DJGPP, Open Watcom) see
+  the long names. Other drives are passed on (DOSLFN can serve FAT drives at the same time).
+* **Files beyond 4 GB:** the 64-bit file position of Enhanced DR-DOS and dosemu2
+  (INT 21h AX=7142h, origin in CL, signed 64-bit offset at DS:DX) works for files on UDF
+  drives: reading continues beyond 4 GB (Blu-ray video files). An ordinary seek (AH=42h)
+  brings the position below 4 GB again; writing stays below 4 GB.
+* **Unloading:** `WINUDF /U` also works when other programs hooked INT 2Fh or INT 21h after
+  WINUDF, as long as they follow the IBM Interrupt Sharing Protocol (both handlers of WINUDF
+  have its header, so other programs can pass WINUDF by too). The cache block is freed from
+  upper memory too, whether WINUDF was loaded high or not.
+* Before it stays resident WINUDF frees its environment and closes its file handles
+  (standard input / output redirected to a file keep no file table entry), and gives its
+  start-up code back: the resident part is its code and data only.
 
 ## 3. Windows 95 / 98 / ME: WINUDF.VXD
 
@@ -166,14 +193,19 @@ Source files and documents are stored with CRLF line ends; `.gitattributes` keep
 ## 6. Tests
 
 Verified in QEMU: DOS 6.22 and Windows 3.1 (MSCDEX with WINCD.SYS, DVD and Blu-ray images of
-every UDF version and partition type; USB disks); Windows 95 and 98 with WINUDF.VXD (CD / DVD /
+every UDF version and partition type; USB disks); MS-DOS 7.1 with JEMM386 or HIMEM alone,
+OAKCDROM with SHSUCDX or MSCDEX (UDF CD, UDF disk with long names: DIR, CD, MD, COPY and
+TYPE with long names, the 64-bit seek, `WINUDF /U` and loading again, `LH`); Windows 95 and 98 with WINUDF.VXD (CD / DVD /
 BD in every variant, bridge discs, writing on a UDF USB disk checked with fsck and CRCs on the
 host); INSTUDF / UNINUDF in DOS / Windows 3.1 without duplicate entries.
 
 ## 7. Limitations
 
-* File sizes are 32-bit (the Windows 9x and DOS APIs): the first 4 GB of larger files are
-  read, writing goes up to 4 GB - 1 byte.
+* File sizes are 32-bit in the Windows 9x and plain DOS APIs: the first 4 GB of larger files
+  are read (in DOS the 64-bit seek AX=7142h reaches the rest), writing goes up to 4 GB - 1
+  byte.
+* WINUDF.EXE keeps about 70 KB resident (code, data, the stacks of its two handlers) plus
+  the cache; load it high (`LH`) when upper memory is free.
 * Discs in CD / DVD / BD drives are mounted read-only (writing to the drives needs packet
   writing software); UDF volumes on USB sticks, hard disks and SD cards are writable. VAT
   volumes are read-only on every medium.
@@ -186,6 +218,22 @@ host); INSTUDF / UNINUDF in DOS / Windows 3.1 without duplicate entries.
 * Windows ME was not tried.
 
 ## Version history
+
+**1.1 (26 October 2026)**
+
+Changelog:
+
+- Added long file names in DOS: WINUDF.EXE answers the long file name API of MS-DOS 7 (INT 21h AX=71xxh: find first / next, open / create, attributes, rename, delete, directories, short / long name, file times), so DIR, COPY and other programs of MS-DOS 7.x show and use the long names of UDF disks; free space (7303h) and 64-bit file positions (7142h) for files of 4 GB and more.
+- WINUDF.EXE is a regular DOS program that can be loaded high (`LH`), about 70 KB resident; its interrupt handlers follow the IBM interrupt sharing protocol, so it unloads (`/U`) after other TSRs that hooked the same interrupts.
+- Works next to SHSUCDX (UDF DVDs of SHSUCDX's drives) and MSCDEX.
+- Fixed unloading and the "already loaded" check.
+- Fixed Windows 98 freezing on UDF disks in partitions Windows 9x calls unformatted (they are read through the BIOS path now).
+- Fixed the "disk structure is corrupted" error when copying folders to UDF disks in Windows 98.
+- Fixed WritePrivateProfileString (INI files) and Explorer writing desktop.ini hanging on UDF drives in Windows 95/98/ME: WINUDF.VXD answers the drive IOCTLs (removable, remote, drive map) itself.
+- Added writing to Windows 10 UDF 2.60 disks (metadata bitmap embedded in its file entry).
+- The volume is written and closed when the disk is removed safely.
+- Added MS-DOS 7.0, 7.1, 8.0 and FreeDOS support; the installer puts WINUDF.EXE into AUTOEXEC.BAT there too (only Windows 95/98/ME use DOSSTART.BAT).
+- The documentation is split into README.md (overview, installation) and MANUAL.md (all details).
 
 **1.0 (12 October 2026)** — first release: UDF 1.02–2.60 read / write, `WINUDF.EXE` for DOS
 and Windows 1.0x–3.11, `WINUDF.VXD` for Windows 95 / 98 / ME.

@@ -660,7 +660,7 @@ int udf_ad_next(struct udf_vol *v, struct udf_node *n)
 /* the block holding byte off of the file: abs (0 for a hole or an extent not recorded) and
    run, the bytes from off that continue in sequence on the device (at least to the end of
    the block) */
-int udf_bmap(struct udf_vol *v, struct udf_node *n, u32 off, u32 *abs, u32 *run)
+int udf_bmap(struct udf_vol *v, struct udf_node *n, u64 off, u32 *abs, u32 *run)
 {
     int r;
     u32 in;
@@ -681,7 +681,7 @@ int udf_bmap(struct udf_vol *v, struct udf_node *n, u32 off, u32 *abs, u32 *run)
             return r ? r : UE_NOTFOUND;
         }
     }
-    in = off - n->c_off;
+    in = (u32)(off - n->c_off);
     if (n->c_type != 0) {
         *abs = 0;
         *run = n->c_elen - in;
@@ -694,20 +694,20 @@ int udf_bmap(struct udf_vol *v, struct udf_node *n, u32 off, u32 *abs, u32 *run)
     return 0;
 }
 
-s32 udf_read(struct udf_vol *v, struct udf_node *n, u32 off, u32 len, u8 FAR *buf)
+s32 udf_read(struct udf_vol *v, struct udf_node *n, u64 off, u32 len, u8 FAR *buf)
 {
     u32 done = 0;
-    if ((u64)off >= n->size) return 0;
-    if ((u64)off + len > n->size) len = (u32)(n->size - off);
+    if (off >= n->size) return 0;
+    if (off + len > n->size) len = (u32)(n->size - off);
     if (n->adtype == AD_ICB) {
         u8 FAR *p = udf_bget(v, n->feabs);
         if (!p) return UE_IO;
         if (off + len > n->lad) return UE_CORRUPT;
-        udf_fcopy(buf, p + FEHDR(n) + n->lea + off, (u16)len);
+        udf_fcopy(buf, p + FEHDR(n) + n->lea + (u32)off, (u16)len);
         return (s32)len;
     }
     while (done < len) {
-        u32 abs, run, k, in = (off + done) & (v->bs - 1);
+        u32 abs, run, k, in = (u32)(off + done) & (v->bs - 1);
         int r = udf_bmap(v, n, off + done, &abs, &run);
         if (r == UE_NOTFOUND) {
             abs = 0;            /* beyond the descriptors: a hole */

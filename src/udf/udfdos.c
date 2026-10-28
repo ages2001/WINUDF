@@ -7,6 +7,7 @@
 #include "udfdos.h"
 
 struct rregs __cdecl rr;
+struct rregs __cdecl lr;
 struct dosinfo di;
 struct dvol vols[MAXVOL];
 u8 nvols;
@@ -42,6 +43,9 @@ u16 getss(void);
 #define DBG(x)
 #endif
 
+
+u32 lfn_hi(u8 FAR *sft);           /* udflfn.c: positions beyond 4 GB */
+int lfn_sethi(u8 FAR *sft, u32 hi);
 
 static u8 FAR *sdap(u16 off)
 {
@@ -732,12 +736,13 @@ static void sft_close(struct dvol *dv, u8 FAR *sft)
         }
         if ((mode & 3) && dv->v.nopen) dv->v.nopen--;
         if (dv->mounted) udf_sync(&dv->v);
+        lfn_sethi(sft, 0);
     }
 }
 
 static void do_read(struct dvol *dv, u8 FAR *sft)
 {
-    u32 pos = *(u32 FAR *)(sft + 0x15), size;
+    u64 pos = ((u64)lfn_hi(sft) << 32) | *(u32 FAR *)(sft + 0x15);
     u8 FAR *buf = *(u8 FAR * FAR *)sdap(0x0C);
     u16 cnt = rr.cx;
     s32 r;
@@ -745,16 +750,22 @@ static void do_read(struct dvol *dv, u8 FAR *sft)
         fail(0x1F);
         return;
     }
-    size = nd.big ? 0xFFFFFFFFUL : (u32)nd.size;
-    if (pos >= size) cnt = 0;
-    else if ((u32)cnt > size - pos) cnt = (u16)(size - pos);
+    if (pos >= nd.size) cnt = 0;
+    else if ((u64)cnt > nd.size - pos) cnt = (u16)(nd.size - pos);
+    /* a read across 4 GB needs a place for the high dword of the position (INT 21h 7142h) */
+    if (((pos + cnt) >> 32) != (pos >> 32) && lfn_sethi(sft, (u32)((pos + cnt) >> 32))) {
+        fail(4);
+        return;
+    }
     buf = (u8 FAR *)MK_FP(FP_SEG(buf) + (FP_OFF(buf) >> 4), FP_OFF(buf) & 15);
     r = cnt ? udf_read(&dv->v, &nd, pos, cnt, buf) : 0;
     if (r < 0) {
         fail(dos_err((int)r));
         return;
     }
-    *(u32 FAR *)(sft + 0x15) = pos + (u32)r;
+    pos += (u32)r;
+    lfn_sethi(sft, (u32)(pos >> 32));
+    *(u32 FAR *)(sft + 0x15) = (u32)pos;
     rr.cx = (u16)r;
     ok();
 }
@@ -765,8 +776,8 @@ static void do_write(struct dvol *dv, u8 FAR *sft)
     u8 FAR *buf = *(u8 FAR * FAR *)sdap(0x0C);
     u16 cnt = rr.cx;
     s32 r;
-    if (!(*(u16 FAR *)(sft + 2) & 3)) {
-        fail(5);
+    if (!(*(u16 FAR *)(sft + 2) & 3) || lfn_hi(sft)) {
+        fail(5);            /* not open for writing, or beyond 4 GB */
         return;
     }
     if (sft_node(dv, sft)) {
@@ -1333,25 +1344,39 @@ int __cdecl redir(void)
     return 0;
 }
 
-/* WINUDF API (INT 2Fh AH=D6h): AL=01h unload. Returns AX=0 and ES = the resident
-   segment, AX=1 when another program hooked INT 2Fh after WINUDF */
+/* IBM Interrupt Sharing Protocol: the handler of vector vec that hands on to mine, or the
+   vector itself when mine is first. NULL when the chain cannot be followed (a handler
+   without the header comes before mine). */
+static void __far * __far *iisp_link(u8 vec, void __far *mine)
+{
+    void __far * __far *p = (void __far * __far *)MK_FP(0, vec * 4);
+    u16 n;
+    for (n = 0; n < 64; n++) {
+        u8 __far *h;
+        if (*p == mine) return p;
+        h = (u8 __far *)*p;
+        if (!h || h[0] != 0xEB || h[1] != 0x10 || *(u16 __far *)(h + 6) != 0x424B) return 0;
+        p = (void __far * __far *)(h + 2);
+    }
+    return 0;
+}
+
+/* WINUDF API (INT 2Fh AH=D6h): AL=01h unload. Returns AX=0 and ES = the PSP of the
+   resident program, AX=1 when INT 2Fh or INT 21h cannot be unhooked */
 int __cdecl api(void)
 {
     u8 i;
+    void __far * __far *l2f;
+    void __far * __far *l21;
     if ((u8)rr.ax != 1) {
         rr.ax = 0xFFFF;
         return 1;
     }
-    {
-        void __far *cur;
-        struct rregs r;
-        r.ax = 0x352F;
-        intx(0x21, &r);
-        cur = MK_FP(r.es, r.bx);
-        if (FP_SEG(cur) != FP_SEG((void __far *)&rr)) {
-            rr.ax = 1;
-            return 1;
-        }
+    l2f = iisp_link(0x2F, (void __far *)int2f);
+    l21 = iisp_link(0x21, (void __far *)int21);
+    if (!l2f || !l21) {
+        rr.ax = 1;
+        return 1;
     }
     for (i = 0; i < nvols; i++) {
         struct dvol *dv = &vols[i];
@@ -1363,8 +1388,10 @@ int __cdecl api(void)
         dv->mounted = 0;
     }
     nvols = 0;
-    unhook2f();
+    unhook_links(l2f, l21);
     rr.ax = 0;
-    rr.es = FP_SEG((void __far *)&rr);
+    rr.es = psp;
     return 1;
 }
+
+#include "udflfn.c"
