@@ -23,6 +23,14 @@ void udf_p64(u8 FAR *p, u64 v)
     udf_p32(p + 4, (u32)(v >> 32));
 }
 
+#ifdef UDF_DOS16
+u8 FAR *udf_padd(const u8 FAR *p, u32 n)
+{
+    u32 a = (u32)(u16)((u32)p) + n;
+    return (u8 FAR *)(((u32)(u16)(((u32)p >> 16) + (u16)(a >> 4)) << 16) | (a & 15));
+}
+#endif
+
 void udf_fcopy(u8 FAR *d, const u8 FAR *s, u16 n)
 {
     while (n--) *d++ = *s++;
@@ -721,7 +729,7 @@ s32 udf_read(struct udf_vol *v, struct udf_node *n, u64 off, u32 len, u8 FAR *bu
             u32 z = k;
             while (z) {
                 u16 c = z > 0x8000UL ? 0x8000U : (u16)z;
-                udf_fset(buf + done + (k - z), 0, c);
+                udf_fset(udf_padd(buf, done + (k - z)), 0, c);
                 z -= c;
             }
         } else if (in == 0 && k >= v->bs) {
@@ -730,20 +738,20 @@ s32 udf_read(struct udf_vol *v, struct udf_node *n, u64 off, u32 len, u8 FAR *bu
             u32 lim = 0x8000UL >> v->bsh;   /* at most 32 KB per device request */
             if (nb > lim) nb = lim;
             k = nb << v->bsh;
-            if (udf_devread(v, abs, (u16)nb, buf + done)) return done ? (s32)done : UE_IO;
+            if (udf_devread(v, abs, (u16)nb, udf_padd(buf, done))) return done ? (s32)done : UE_IO;
             {
                 /* blocks in the cache may be newer than the device */
                 u32 i;
                 for (i = 0; i < nb; i++) {
                     struct cslot *s = cfind(v, abs + i);
-                    if (s) udf_fcopy(buf + done + (i << v->bsh), s->data, v->bs);
+                    if (s) udf_fcopy(udf_padd(buf, done + (i << v->bsh)), s->data, v->bs);
                 }
             }
         } else {
             u8 FAR *p = udf_bget(v, abs);
             if (!p) return done ? (s32)done : UE_IO;
             if (k > v->bs - in) k = v->bs - in;
-            udf_fcopy(buf + done, p + in, (u16)k);
+            udf_fcopy(udf_padd(buf, done), p + in, (u16)k);
         }
         done += k;
     }

@@ -22,6 +22,8 @@
 %define SVC_Wait_Semaphore      00010027h
 %define SVC_Signal_Semaphore    00010028h
 %define SVC_Get_System_Time     0001003Fh
+%define SVC_LinPageLock         00010063h
+%define SVC_LinPageUnLock       00010064h
 %define SVC_HeapAllocate        0001004Fh
 %define SVC_HeapFree            00010051h
 %define SVC_BlockOnID           000100FAh
@@ -51,7 +53,7 @@ WINUDF_DDB:
         dd 0                    ; next
         dw 0400h                ; SDK version (Windows 95)
         dw 0                    ; Undefined_Device_ID: no services
-        db 1, 1                 ; version 1.1
+        db 1, 2                 ; version 1.2
         dw 0                    ; flags
         db 'WINUDF  '           ; name
         dd 0A0010100h           ; FSD_Init_Order: after the IFS Manager
@@ -147,6 +149,8 @@ CSVC _vx_metamatch, SVC_IFS_MetaMatch, 3         ; int (u16 *pattern, u16 *name,
 CSVC _vx_unitobcs, SVC_IFS_UniToBCS, 5           ; u32 (u8 *out, u16 *in, bytes, max, set)
 CSVC _vx_bcstouni, SVC_IFS_BCSToUni, 4           ; u32 (u16 *out, u8 *in, bytes, set)
 CSVC _vx_ios_register, SVC_IOS_Register, 1       ; void (struct drp *)
+CSVC _vx_pagelock, SVC_LinPageLock, 3            ; u32 (page, pages, flags): nonzero when locked
+CSVC _vx_pageunlock, SVC_LinPageUnLock, 3        ; u32 (page, pages, flags)
 
 ; int vx_intr(u32 n, struct v86r *r): software interrupt n in V86 mode (nested execution in
 ; the current VM); r: EAX EBX ECX EDX ESI EDI, DS ES (words), flags out

@@ -34,6 +34,14 @@ typedef unsigned long long u64;
 #define FAR
 #endif
 
+/* buffer + n bytes; in 16-bit DOS normalized (offset below 16), so that a transfer of up to
+   64 KB from there never runs past the end of the segment */
+#ifdef UDF_DOS16
+u8 FAR *udf_padd(const u8 FAR *p, u32 n);
+#else
+#define udf_padd(p, n)  ((u8 *)(p) + (n))
+#endif
+
 #define UDF_MAXBS       4096    /* largest logical block size */
 #ifdef UDF_DOS16
 #define UDF_MAXPM       3       /* partition maps of a logical volume */

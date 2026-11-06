@@ -1355,7 +1355,7 @@ static void __far * __far *iisp_link(u8 vec, void __far *mine)
         u8 __far *h;
         if (*p == mine) return p;
         h = (u8 __far *)*p;
-        if (!h || h[0] != 0xEB || h[1] != 0x10 || *(u16 __far *)(h + 6) != 0x424B) return 0;
+        if (!h || *(u16 __far *)(h + 6) != 0x424B) return 0;     /* 'KB' signature; the entry jump may be short or near */
         p = (void __far * __far *)(h + 2);
     }
     return 0;

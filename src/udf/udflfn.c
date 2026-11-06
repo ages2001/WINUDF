@@ -7,8 +7,10 @@
 
    Paths may have long names in every component, '/' or '\', "." and "..". Files are opened
    by the DOS function 6Ch with their 8.3 names (DOS then calls the redirector as usual);
-   a new file gets its long name first. Search handles and the high dwords of the file
-   positions live in small tables. */
+   a new file gets its long name first (DOS versions before 4.0, without function 6Ch, get
+   the same with 3Dh). Search handles live in a small table; the high dword of a file
+   position beyond 4 GB is kept in the file's own system file table entry (the dword at
+   offset 07h, free for a redirector), so any number of open files can be beyond 4 GB. */
 
 #define LFN_HANDLES     8
 #define LFN_HBASE       0x5D00      /* search handles: LFN_HBASE + index */
@@ -20,13 +22,6 @@ static struct lsearch {
     u32 pos;
     char pat[LFN_PATH];
 } lsr[LFN_HANDLES];
-
-/* high dwords of the file positions beyond 4 GB (SFTs of UDF files) */
-#define LFN_HI          8
-static struct {
-    u8 FAR *sft;
-    u32 hi;
-} lhi[LFN_HI];
 
 static char lpath[LFN_PATH], lpath2[LFN_PATH], lshort[LFN_PATH];
 static char lname[LFN_PATH];
@@ -483,36 +478,16 @@ static u8 FAR *sft_of(u16 h)
     return (u8 FAR *)MK_FP(r.es, r.di);
 }
 
-static int same_sft(u8 FAR *a, u8 FAR *b)
-{
-    return ((u32)FP_SEG(a) << 4) + FP_OFF(a) == ((u32)FP_SEG(b) << 4) + FP_OFF(b);
-}
-
-/* the high dword of the position of a file (0 when below 4 GB) */
+/* the high dword of the position of a file (0 when below 4 GB): the dword at offset 07h of
+   its SFT, which DOS leaves to the redirector (zeroed when the file is opened) */
 u32 lfn_hi(u8 FAR *sft)
 {
-    u16 i;
-    for (i = 0; i < LFN_HI; i++)
-        if (lhi[i].sft && same_sft(lhi[i].sft, sft)) return lhi[i].hi;
-    return 0;
+    return *(u32 FAR *)(sft + 7);
 }
 
-/* set it; 0 or -1 when the table is full */
 int lfn_sethi(u8 FAR *sft, u32 hi)
 {
-    u16 i, f = LFN_HI;
-    for (i = 0; i < LFN_HI; i++) {
-        if (lhi[i].sft && same_sft(lhi[i].sft, sft)) {
-            if (hi) lhi[i].hi = hi;
-            else lhi[i].sft = 0;
-            return 0;
-        }
-        if (!lhi[i].sft && f == LFN_HI) f = i;
-    }
-    if (!hi) return 0;
-    if (f == LFN_HI) return -1;
-    lhi[f].sft = sft;
-    lhi[f].hi = hi;
+    *(u32 FAR *)(sft + 7) = hi;
     return 0;
 }
 
@@ -849,13 +824,50 @@ static void l_open(struct dvol *dv, u8 drive)
     }
     lshort[0] = (char)('A' + drive);
     lshort[1] = ':';
-    q.ax = 0x6C00;
-    q.bx = (u16)(mode & 0x60FF);
-    q.cx = (u16)(lr.cx & 0x27);
-    q.dx = (u16)(act & 0x03);
-    q.ds = FP_SEG((void FAR *)lshort);
-    q.si = FP_OFF((void FAR *)lshort);
-    intx(0x21, &q);
+    if (di.major >= 4) {
+        /* the caller's mode, attributes and action as they are (the file exists by now:
+           one this call created is only opened) */
+        q.ax = 0x6C00;
+        q.bx = mode;
+        q.cx = lr.cx;
+        q.dx = act;
+        q.ds = FP_SEG((void FAR *)lshort);
+        q.si = FP_OFF((void FAR *)lshort);
+        intx(0x21, &q);
+    } else {
+        /* DOS 3.x: function 3Dh, and a zero-byte write for "truncate" */
+        u16 h = 0xFFFF;
+        if (!created && (act & 0x03) == 2) {
+            q.ax = (u16)(0x3D00 | ((mode & 3) ? (mode & 0xF3) : ((mode & 0xF0) | 2)));
+            q.ds = FP_SEG((void FAR *)lshort);
+            q.dx = FP_OFF((void FAR *)lshort);
+            intx(0x21, &q);
+            if (q.fl & 1) {
+                lfail(q.ax);
+                return;
+            }
+            h = q.ax;
+            q.ax = 0x4000;
+            q.bx = h;
+            q.cx = 0;
+            intx(0x21, &q);
+            if (!(mode & 3)) {
+                q.ax = 0x3E00;
+                q.bx = h;
+                intx(0x21, &q);
+                h = 0xFFFF;
+            }
+        }
+        if (h == 0xFFFF) {
+            q.ax = (u16)(0x3D00 | (mode & 0xF3));
+            q.ds = FP_SEG((void FAR *)lshort);
+            q.dx = FP_OFF((void FAR *)lshort);
+            intx(0x21, &q);
+        } else {
+            q.ax = h;
+            q.fl = 0;
+        }
+    }
     if (q.fl & 1) {
         lfail(q.ax);
         return;
@@ -909,7 +921,6 @@ static void l_seek(struct dvol *dv, u8 FAR *sft)
     u8 FAR *q = (u8 FAR *)MK_FP(lr.ds, lr.dx);
     u64 cur = ((u64)lfn_hi(sft) << 32) | *(u32 FAR *)(sft + 0x15), base = 0, np;
     u64 uoff = G64(q, 0);
-    int neg = (q[7] & 0x80) != 0;
     u8 how = (u8)lr.cx;
     if (sft_node(dv, sft)) {
         lfail(6);
@@ -921,15 +932,10 @@ static void l_seek(struct dvol *dv, u8 FAR *sft)
         lfail(1);
         return;
     }
-    if (neg && (0 - uoff) > base) {
-        lfail(0x83);        /* negative position */
-        return;
-    }
+    /* like DOS's own seek, a position "before" the start is not refused: it wraps around
+       (a later read there gets nothing) */
     np = base + uoff;
-    if (lfn_sethi(sft, (u32)(np >> 32))) {
-        lfail(4);
-        return;
-    }
+    lfn_sethi(sft, (u32)(np >> 32));
     *(u32 FAR *)(sft + 0x15) = (u32)np;
     udf_p64(q, np);
     lok();

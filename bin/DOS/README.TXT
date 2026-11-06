@@ -1,4 +1,4 @@
-# WINUDF 1.1 - UDF file system for DOS, Windows 1.0x-3.11 and Windows 95 / 98 / ME
+# WINUDF 1.2 - UDF file system for DOS, Windows 1.x / 2.x / 3.x / 95 / 98 / ME
 
 WINUDF reads and writes **UDF** (versions 1.02 to 2.60), the file system of DVDs, Blu-ray
 discs, packet-written CDs and UDF-formatted USB sticks and disks: `WINUDF.EXE` gives DOS and
@@ -76,6 +76,22 @@ else: all options, how the driver works, hardware and chipset notes, the program
 interface, building from source, tests and known limitations.
 
 ## Version history
+
+**1.2 (2 November 2026)**
+
+Changelog:
+
+- Program Manager (Windows 3.x): an **Uninstall WINUDF** item with a red cross on the disk icon (Windows closes, `UNINUDF /REBOOT` runs and restarts the computer). The banner lists the systems (DOS, Windows 1.x/2.x/3.x/95/98/ME).
+- Windows 95/98/ME: programs on UDF discs (and WINUDF's own installer) no longer crash with 0xC0000005. The buffer of a read or write is locked before the driver starts: a page of the program's own image could be paged in from the same disc in the middle of the request, and the page-in then used the driver's block cache and transfer buffer, so the program got the data of the page-in.
+- Extents of files written or filled are never longer than an extent can describe (just under 1 GB): a hole filled at once was one extent of any size (and its length overflowed into the type bits); merging blocks into the last extent can no longer overflow either.
+- DOS: buffers are normalized before device transfers, so a 32 KB transfer never runs past the end of a 64 KB segment.
+- Long file names: INT 21h 716Ch passes the caller's mode, attributes and action to DOS as they are (the create action was masked off); on DOS 3.x, which has no function 6Ch, the file is opened with function 3Dh (issues #9, #12).
+- INT 21h 7142h accepts negative positions, like DOS's own seek (issue #11).
+- The high dword of a file position beyond 4 GB is kept in the file's system file table entry (offset 07h, free for a redirector) instead of a table of eight entries: any number of open files can be beyond 4 GB (issue #10).
+- Before staying resident, handles 0-19 are closed without looking at the job file table (issue #8).
+- Unloading follows interrupt handlers whose IISP header has a jump of any kind before the 'KB' signature (issue #7).
+- The texts of WINUDF.EXE, the VxD and the documentation name Windows 1.0 to ME.
+
 
 **1.1 (26 October 2026)**
 

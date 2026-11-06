@@ -69,6 +69,8 @@ struct hndlmisc {
 #define ACT_EXISTS_OPEN 0x01
 #define ACT_TRUNCATE    0x02
 #define ACT_CREATE      0x10
+#define R0_SWAPPER_CALL 0x1000          /* ir_options of reads and writes: paging */
+#define R0_MM_READ_WRITE 0x8000
 
 #define FA_RDONLY       0x01
 #define FA_HIDDEN       0x02
@@ -204,6 +206,8 @@ int __cdecl vx_metamatch(const u16 *pat, const u16 *name, u32 flags);
 u32 __cdecl vx_unitobcs(u8 *out, const u16 *in, u32 bytes, u32 max, u32 set);
 u32 __cdecl vx_bcstouni(u16 *out, const u8 *in, u32 bytes, u32 set);
 void __cdecl vx_ios_register(struct drp *d);
+u32 __cdecl vx_pagelock(u32 page, u32 n, u32 flags);
+u32 __cdecl vx_pageunlock(u32 page, u32 n, u32 flags);
 u32 __cdecl vx_vmm_version(void);
 u32 __cdecl vx_ifs_version(void);
 u32 __cdecl vx_sem_create(void);
@@ -2082,12 +2086,35 @@ static int __cdecl fs_findclose(struct ioreq *ir)
 
 /* ------------------------------------------------------------------ handle functions */
 
+/* The buffer of a read or write in memory of the program, locked for the time of the request.
+   Its pages may still be on the disk: a page of a program or DLL image (its data section,
+   say) that is paged in from a UDF volume itself. Touched under the lock of the driver,
+   such a page would bring the driver back for the page-in in the middle of the request,
+   with the block cache and the transfer buffer in use; the data copied for the program
+   would then be the data of the page-in (an access violation in the program). Paging
+   requests (the swapper, memory-mapped files) come with locked buffers already. */
+static u32 buf_lock(struct ioreq *ir)
+{
+    u32 a = (u32)ir->data, first, n;
+    if (!ir->length || (ir->options & (R0_SWAPPER_CALL | R0_MM_READ_WRITE))) return 0;
+    first = a >> 12;
+    n = ((a + ir->length - 1) >> 12) - first + 1;
+    if (!vx_pagelock(first, n, 0)) return 0;
+    return n;
+}
+
+static void buf_unlock(struct ioreq *ir, u32 n)
+{
+    if (n) vx_pageunlock((u32)ir->data >> 12, n, 0);
+}
+
 static int __cdecl fs_read(struct ioreq *ir)
 {
     struct whandle *h = (struct whandle *)ir->fh;
     struct wobj *o = h->o;
     s32 n;
     int r = 0;
+    u32 lk = buf_lock(ir);
     enter();
     DLOG(("WINUDF: read fl %b opt %w len %x pos %x\r\n", ir->flags, ir->options, ir->length, ir->pos));
     if ((h->mode & ACCESS_MODE) == 1) r = E_ACCESS;
@@ -2106,6 +2133,7 @@ static int __cdecl fs_read(struct ioreq *ir)
         }
     }
     leave();
+    buf_unlock(ir, lk);
     return ret(ir, r);
 }
 
@@ -2115,6 +2143,7 @@ static int __cdecl fs_write(struct ioreq *ir)
     struct wobj *o = h->o;
     struct wvol *w = o->w;
     int r = 0;
+    u32 lk = buf_lock(ir);
     enter();
     DLOG(("WINUDF: write fl %b opt %w len %x pos %x\r\n", ir->flags, ir->options, ir->length, ir->pos));
     if ((h->mode & ACCESS_MODE) == 0 || (h->mode & ACCESS_MODE) == 3) r = E_ACCESS;
@@ -2133,6 +2162,7 @@ static int __cdecl fs_write(struct ioreq *ir)
         }
     }
     leave();
+    buf_unlock(ir, lk);
     return ret(ir, r);
 }
 

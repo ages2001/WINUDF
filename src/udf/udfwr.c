@@ -22,6 +22,9 @@ struct uext {
 };
 
 static struct uext ext[MAXEXT];
+
+/* blocks one extent can describe: its length field has 30 bits, whole blocks */
+#define EXT_MAXB(v)     ((0x3FFFFFFFUL - BS(v)) >> (v)->bsh)
 static u16 next_n;
 static struct udf_loc aed[MAXAED];
 static u16 naed;
@@ -543,12 +546,16 @@ static int ext_grow(struct udf_vol *v, struct udf_node *n, u32 nb)
         if (r) return r;
         while (got) {
             u32 k = got;
+            u32 maxb = EXT_MAXB(v), room = 0;
             l = next_n ? &ext[next_n - 1] : 0;
             if (l && l->type == 0 && l->part == pmi && l->lbn + BLKS(v, l->len) == lbn &&
-                !(l->len & (BS(v) - 1)) && l->len + (k << v->bsh) <= 0x3FFFFFFFUL - BS(v)) {
+                !(l->len & (BS(v) - 1)) && l->len <= (maxb << v->bsh))
+                room = maxb - (l->len >> v->bsh);
+            if (room) {
+                /* the last extent grows as far as an extent can (just under 1 GB) */
+                if (k > room) k = room;
                 l->len += k << v->bsh;
             } else {
-                u32 maxb = (0x3FFFFFFFUL - BS(v)) >> v->bsh;
                 if (next_n == MAXEXT) {
                     bfree(v, pmi, lbn, got);
                     return UE_UNSUPP;
@@ -626,11 +633,15 @@ static int ext_fill(struct udf_vol *v, struct udf_node *n, u32 off, u32 end)
                 next_n = i;
                 while (nb) {
                     u32 lbn, got, gl;
-                    r = balloc(v, pmi, 0, nb, &lbn, &got);
+                    if (next_n == MAXEXT) return UE_UNSUPP;
+                    /* one extent describes at most just under 1 GB */
+                    r = balloc(v, pmi, 0, nb < EXT_MAXB(v) ? nb : EXT_MAXB(v), &lbn, &got);
                     if (r) return r;
                     r = zero_blocks(v, pmi, lbn, got);
-                    if (r) return r;
-                    if (next_n == MAXEXT) return UE_UNSUPP;
+                    if (r) {
+                        bfree(v, pmi, lbn, got);
+                        return r;
+                    }
                     gl = got << v->bsh;
                     if (gl > len) gl = len;
                     ext[next_n].len = gl;
@@ -747,9 +758,9 @@ static s32 data_write(struct udf_vol *v, struct udf_node *n, u32 off, u32 len, c
             if (nb > lim) nb = lim;
             k = nb << v->bsh;
             if (buf) {
-                r = udf_devwrite(v, abs, (u16)nb, buf + done);
+                r = udf_devwrite(v, abs, (u16)nb, udf_padd(buf, done));
                 if (r) return r;
-                udf_cache_update(v, abs, (u16)nb, buf + done);
+                udf_cache_update(v, abs, (u16)nb, udf_padd(buf, done));
             } else {
                 u32 i;
                 for (i = 0; i < nb; i++) {
@@ -766,7 +777,7 @@ static s32 data_write(struct udf_vol *v, struct udf_node *n, u32 off, u32 len, c
             if (k > BS(v) - in) k = BS(v) - in;
             p = (in == 0 && k == BS(v)) ? udf_bnew(v, abs) : udf_bget(v, abs);
             if (!p) return UE_IO;
-            if (buf) udf_fcopy(p + in, buf + done, (u16)k);
+            if (buf) udf_fcopy(p + in, udf_padd(buf, done), (u16)k);
             else udf_fset(p + in, 0, (u16)k);
             r = pput(v, part, lbn, abs, p);
             if (r) return r;

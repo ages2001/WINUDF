@@ -630,7 +630,7 @@ int __cdecl dos_init(void)
 {
     struct rregs r;
     u16 bsmax = 2048, i;
-    puts_("WINUDF 1.1 - UDF file system for DOS and Windows 1.0-3.11 (UDF 1.02-2.60)\n");
+    puts_("WINUDF 1.2 - UDF 1.02-2.60 file system - DOS, Windows 1.x/2.x/3.x/95/98/ME\n");
     if (args()) {
         usage();
         exitcode = 1;
@@ -718,13 +718,11 @@ int __cdecl dos_init(void)
     }
     /* the handles of the program (standard input, output, ... maybe redirected to a file)
        are closed before it stays resident: they would keep their system file table
-       entries in use for good */
+       entries in use for good. Every possible handle is simply closed (DOS refuses the
+       ones that are not open). */
     {
-        u16 n = *(u16 FAR *)MK_FP(psp, 0x32), h;
-        u8 FAR *jft = *(u8 FAR * FAR *)MK_FP(psp, 0x34);
-        if (ver < 0x0300 || n > 255) n = 20;
-        for (h = 0; h < n; h++) {
-            if (jft[h] == 0xFF) continue;
+        u16 h;
+        for (h = 0; h < 20; h++) {
             r.ax = 0x3E00;
             r.bx = h;
             intx(0x21, &r);
